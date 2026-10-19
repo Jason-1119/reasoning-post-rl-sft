@@ -181,28 +181,6 @@ Model weights, datasets, and generated run directories are not included in the s
 4. Configure the project and model paths.
 5. Run the notebook cells in order.
 
-Example configuration:
-
-```python
-from pathlib import Path
-
-PROJECT = Path(
-    "/content/drive/MyDrive/reasoning-post-rl-sft"
-)
-
-ROOT = Path(
-    "/content/drive/MyDrive/qwen3_1p7b_128_en/"
-    "runs/ds8b_qwen1p7b_128_001"
-)
-
-RL_STAGE = "grpo"
-DAPO_RUN = "dapo_001"
-NAME = f"matched_{RL_STAGE}_post_sft_001"
-
-TRAIN_N, TEST_N = 64, 64
-EPOCHS = 1
-LEARNING_RATE = 1e-5
-```
 
 `PROJECT` contains the shared scripts and requirements. `ROOT` points to the existing experiment containing the saved adapters, original data, and manifest.
 
