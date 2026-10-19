@@ -1,136 +1,337 @@
-# Qwen3-1.7B Math Reasoning: 128 Teacher Questions and 64 GRPO Updates
+# reasoning-post-rl-sft
 
-Teacher: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`  
-Student: `Qwen/Qwen3-1.7B-Base`  
-Pipeline: offline teacher generation -> verified traces -> one-epoch LoRA SFT -> 64 LoRA GRPO updates -> evaluation.
+Controlled experiments comparing **RL followed by additional SFT** against **direct additional SFT** for Qwen3-1.7B reasoning models.
 
-All project instructions, notebook cells, labels, comments, and runtime messages are in English. Models and datasets are downloaded at runtime; weights and generated data are not included.
+> Does an intermediate RL stage provide additional value when both training routes receive identical subsequent supervised fine-tuning?
 
-## Default experiment
+This repository presents a small-scale experimental study. It does not introduce a new RL algorithm or claim a statistically established performance improvement.
 
-| Stage | Configuration |
-|---|---|
-| Teacher questions | 128 unique GSM8K training questions; up to two attempts each |
-| SFT | One epoch on accepted complete traces; at most 128 samples |
-| RL questions | 128 different GSM8K training questions |
-| GRPO | 64 optimizer updates, four completions per question |
-| Development set | 32 separate GSM8K training questions |
-| Final test | 64 fixed randomly sampled GSM8K test questions, seed 42 |
-| Optional evaluation | Teacher on the same 64 questions; MATH-500 available separately |
+## Overview
 
-SFT, RL, development, and test questions are disjoint after normalized exact deduplication. Model and dataset revisions are saved in `manifest.json`. This does not eliminate semantic duplicates or pretraining contamination. With the same source revision and seed, the default GSM8K test subset matches the earlier 32-question project's test subset.
-
-128 is the number of teacher candidate questions, not a guarantee of 128 accepted SFT samples. Incorrect, incomplete, unparseable, or overlength traces are rejected. Teacher prompts do not contain gold answers or reference solutions. Correct final answers do not certify every reasoning step; manually inspect a sample of accepted traces. The current recipe retains both reasoning and final explanations, which may contain repetition; that behavior is retained for comparability.
-
-## Run in Colab
-
-1. Extract this folder and upload it to `MyDrive/qwen3_1p7b_128_en`.
-2. Open `Colab_Run.ipynb` in Colab and select a CUDA GPU with BF16 support.
-3. Run the notebook cells in order. Restart the session if requested after dependency installation; do not delete the runtime.
-4. Use the new default experiment directory `runs/ds8b_qwen1p7b_128_001`. Do not reuse old manifests, adapters, or evaluation outputs.
-
-The notebook installs the fixed dependencies and repairs the specific Colab conflicts previously observed: missing Jedi, mismatched gcsfs/fsspec, and unused Gradio/Diffusers requiring a newer HF Hub. That repair removes Gradio/Diffusers from this temporary training environment; it does not delete data or model caches. Set `REPAIR_COLAB_PACKAGES=False` if your environment is already compatible. A successful `pip check` alone does not guarantee GPU-library compatibility; import checks and the first training updates still matter.
-
-The profile targets the user's approximately 22.5 GB GPU. The teacher uses BF16, batch size one, and about 16 GB for weights alone; generation caches add memory. The student uses BF16 LoRA, not full-parameter training. Models run sequentially in separate subprocesses. Actual peak memory and speed must be measured on your runtime; GPU execution has not been tested locally.
-
-## Progress you can see
-
-Each subprocess streams output immediately to the Colab cell and writes a timestamped console log under `ROOT/logs/`. Generation and evaluation print question counts, completion percentage, elapsed time, and estimated remaining time. SFT and GRPO print progress after every optimizer update:
+Starting from the same original SFT model, we compare:
 
 ```text
-[grpo] [##########----------] 32/64 (50.0%) elapsed=00:12:00 ETA=00:12:00 reward=0.5 ...
+Route A: Original SFT → GRPO → Additional SFT
+Route B: Original SFT ──────→ Additional SFT
 ```
 
-This is an illustrative format, not a measured training result or timing promise. The first RL update can take longer while four answers are generated; the display advances after an update, not after each token. Model downloads and loading have separate messages and are not optimizer updates. ETA is an estimate that becomes more useful after several updates and excludes earlier sessions when resuming.
+Both routes receive the same additional supervised examples, learning rate, epoch count, batching configuration, and random seed.
 
-| File | Contents |
+The experiment reuses an existing RL checkpoint rather than rerunning RL. It evaluates four models:
+
+| Model | Description |
 |---|---|
-| `logs/teacher_metrics.jsonl` | Completed teacher questions, accepted-question count, attempts, elapsed time, ETA |
-| `logs/sft_metrics.jsonl` | SFT update number, loss, learning rate, epoch, GPU memory |
-| `logs/grpo_metrics.jsonl` | GRPO update number and TRL logs, including reward, reward spread, completion lengths when provided |
-| `logs/eval_*_metrics.jsonl` | Evaluation progress |
-| `logs/*.console.log` | Full streamed stdout/stderr, including errors and checkpoints |
-| `eval/comparison.csv` | Evaluation comparison exported by `inspect_run.py` |
+| `original_sft` | Original SFT model |
+| `original_rl` | Existing RL model derived from the original SFT model |
+| `rl_then_sft` | RL model continued with additional SFT |
+| `direct_sft` | Original SFT model continued with identical additional SFT |
 
-GPU allocated/peak memory describe this training process, not all allocations on the GPU. Checkpoints are saved every 16 updates; the latest three are retained, and a final adapter is saved separately. SFT typically needs around 16 updates for 128 samples with gradient accumulation 8, and fewer if filtering removes samples. 64 GRPO updates is a fixed stopping point, not a claim of optimality.
+**The additional SFT budget is matched, but total pipeline compute is not.** Route A includes the cost of the earlier RL stage.
 
-The notebook includes result tables, progress inspection, and post-training loss/reward charts. You can inspect the saved state without loading a model:
+## Models
 
-```bash
-python inspect_run.py --root runs/ds8b_qwen1p7b_128_001
+- **Student:** [Qwen3-1.7B-Base](https://huggingface.co/Qwen/Qwen3-1.7B-Base)
+- **Initial teacher:** [DeepSeek-R1-Distill-Llama-8B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
+- **Adaptation:** BF16 LoRA, rank 16
+- **Training framework:** Transformers, PEFT, and TRL
+
+The final model files are LoRA adapters. Inference requires the original base model and one selected adapter.
+
+## Original Training
+
+The source SFT model was trained for one epoch on verified teacher-generated reasoning traces from up to 128 GSM8K training questions.
+
+The source GRPO configuration was:
+
+| Parameter | Value |
+|---|---:|
+| RL training questions | 128 |
+| Optimizer updates | 64 |
+| Learning rate | `5e-6` |
+| Completions per question | 4 |
+| Per-device batch size | 1 |
+| Gradient accumulation | 4 |
+| Temperature | 0.8 |
+| Top-p | 0.95 |
+| Maximum completion length | 2,048 |
+| KL coefficient | 0 |
+| Random seed | 42 |
+
+The project uses `trl==0.23.1`, whose `GRPOConfig` defaults to DAPO-style loss normalization. The `grpo` label identifies the original training recipe; it does not imply use of the original sequence-normalized GRPO loss.
+
+A separately saved DAPO adapter can also be selected as the RL source.
+
+## Additional SFT Configuration
+
+| Parameter | Both Routes |
+|---|---|
+| Training data | 64 new GSM8K training questions |
+| Supervision | Original GSM8K reference solutions |
+| Epochs | 1 |
+| Learning rate | `1e-5` |
+| Per-device batch size | 1 |
+| Gradient accumulation | 8 |
+| Optimizer updates in the reported run | 8 |
+| Maximum sequence length | 2,048 |
+| Precision | BF16 |
+| Random seed | 42 |
+
+Additional training examples are selected independently of model predictions. They are not mined from test-set errors.
+
+Calculator annotation wrappers are removed from the GSM8K reference solutions while retaining the reasoning and final answers. Complete examples exceeding the sequence limit are excluded rather than truncated.
+
+Both branches:
+
+- Use identical pretokenized examples.
+- Compute loss only on completion tokens, including EOS.
+- Mask prompt and padding tokens.
+- Start with fresh optimizers.
+- Continue their respective source LoRA adapters.
+- Save new adapters without overwriting the original models.
+
+This is a **generic additional-SFT comparison**, not targeted regression repair.
+
+## Evaluation
+
+All four models are evaluated on the same 64 newly selected GSM8K test questions.
+
+Questions recorded in the original project splits and saved external-evaluation subsets are excluded through normalized exact matching. This does not eliminate semantic duplicates or pretraining contamination.
+
+Evaluation settings:
+
+| Setting | Value |
+|---|---|
+| Dataset | GSM8K `main/test` |
+| Questions | 64 |
+| Decoding | Greedy |
+| Answers per question | 1 |
+| Maximum new tokens | 2,048 |
+| Prompt | Identical plain-text student prompt |
+| Grading | Strict numeric answer verification |
+
+The verifier extracts an explicit `#### <number>` or numeric `\boxed{...}` answer. It does not guess the answer from the last number in the response.
+
+Reported metrics include:
+
+- Correct answer count and accuracy
+- Answer parse rate
+- Mean output length
+- Mean generation time
+- Generation-budget hit rate
+- Paired correctness differences between the two routes
+
+The final one-epoch adapters are evaluated. Test accuracy is not used to select checkpoints.
+
+## Results
+
+The following results were recorded from one completed Colab experiment using the saved **GRPO** adapter as the RL source.
+
+| Model | Correct / 64 | Accuracy (%) | Parse Rate (%) | Mean Tokens | Mean Seconds | Budget Hit (%) |
+|---|---:|---:|---:|---:|---:|---:|
+| Original SFT | 45 | 70.31 | 95.31 | 290.66 | 21.66 | 3.12 |
+| Original GRPO | 45 | 70.31 | 100.00 | 303.75 | 23.26 | 3.12 |
+| GRPO → Additional SFT | **46** | **71.88** | 96.88 | 248.70 | 19.11 | 1.56 |
+| Direct Additional SFT | 45 | 70.31 | 96.88 | **243.06** | **18.45** | 1.56 |
+
+Both additional-SFT branches completed eight optimizer updates.
+
+### Paired Comparison
+
+| Outcome | Questions |
+|---|---:|
+| Both routes correct | 43 |
+| Only RL → SFT correct | 3 |
+| Only direct SFT correct | 2 |
+| Both routes wrong | 16 |
+
+### Findings
+
+- Additional SFT shortened responses in both routes relative to their starting checkpoints.
+- RL → SFT answered one more question correctly than direct additional SFT.
+- Direct additional SFT produced the shortest responses and lowest mean generation time.
+- The one-question accuracy difference does not establish a stable advantage for the intermediate RL stage.
+- These results use a different test subset from earlier experiments, so absolute scores should not be directly compared across subsets.
+
+The table is transcribed from the completed run. Independent verification requires the corresponding adapters, frozen questions, logs, environment metadata, and per-question predictions.
+
+## Repository Structure
+
+```text
+reasoning-post-rl-sft/
+├── README.md
+├── RL_Then_SFT_vs_Direct_SFT.ipynb
+├── compare_post_sft.py
+├── pipeline.py
+├── monitoring.py
+├── requirements.txt
+├── repair_colab.py
+├── test_core.py
+└── test_post_sft.py
 ```
 
-## Command-line workflow
+The notebook embeds the comparison runner, so `compare_post_sft.py` is optional for notebook execution.
 
-Run these commands from the project directory. Set `HF_HOME` to your preferred cache before starting a subprocess. The notebook automatically uses separate teacher/student caches.
+Model weights, datasets, and generated run directories are not included in the source repository.
+
+## Run in Google Colab
+
+1. Open `RL_Then_SFT_vs_Direct_SFT.ipynb` in Colab.
+2. Select a CUDA GPU with BF16 support.
+3. Mount the Drive containing the existing experiment.
+4. Configure the project and model paths.
+5. Run the notebook cells in order.
+
+Example configuration:
+
+```python
+from pathlib import Path
+
+PROJECT = Path(
+    "/content/drive/MyDrive/reasoning-post-rl-sft"
+)
+
+ROOT = Path(
+    "/content/drive/MyDrive/qwen3_1p7b_128_en/"
+    "runs/ds8b_qwen1p7b_128_001"
+)
+
+RL_STAGE = "grpo"
+DAPO_RUN = "dapo_001"
+NAME = f"matched_{RL_STAGE}_post_sft_001"
+
+TRAIN_N, TEST_N = 64, 64
+EPOCHS = 1
+LEARNING_RATE = 1e-5
+```
+
+`PROJECT` contains the shared scripts and requirements. `ROOT` points to the existing experiment containing the saved adapters, original data, and manifest.
+
+To use the saved DAPO adapter:
+
+```python
+RL_STAGE = "dapo"
+```
+
+The original training notebook does not need to be open. Neither teacher generation nor the initial SFT/RL training is repeated.
+
+Use a new experiment name when changing settings or source adapters.
+
+## Command-Line Usage
+
+From the project directory:
 
 ```bash
 python -m pip install -r requirements.txt
 python -m pip check
-python -m unittest -v test_core.py
 
-python pipeline.py prepare --root runs/ds8b_qwen1p7b_128_001
-python pipeline.py teacher --root runs/ds8b_qwen1p7b_128_001
-python pipeline.py build --root runs/ds8b_qwen1p7b_128_001
-python pipeline.py sft --root runs/ds8b_qwen1p7b_128_001
-python pipeline.py eval --root runs/ds8b_qwen1p7b_128_001 --stage sft --split dev
-python pipeline.py grpo --root runs/ds8b_qwen1p7b_128_001 --steps 64
-python pipeline.py eval --root runs/ds8b_qwen1p7b_128_001 --stage grpo --split dev
-
-python pipeline.py eval --root runs/ds8b_qwen1p7b_128_001 --stage base --split test_gsm8k
-python pipeline.py eval --root runs/ds8b_qwen1p7b_128_001 --stage sft --split test_gsm8k
-python pipeline.py eval --root runs/ds8b_qwen1p7b_128_001 --stage grpo --split test_gsm8k
-python inspect_run.py --root runs/ds8b_qwen1p7b_128_001
+python -m unittest -v test_core.py test_post_sft.py
 ```
 
-The GRPO CLI defaults to 64 updates even when `--steps` is omitted. For SFT, the default `--steps -1` means one epoch; a positive value overrides this with a fixed update count. All default generation budgets are unchanged: teacher 4096, SFT total sequence 4096, RL completion 2048, evaluation completion 2048.
-
-## Resume and checkpoints
-
-Teacher generation and evaluation save each answer and skip completed records on rerun. Training needs an actual Trainer checkpoint, including optimizer state:
+Run the comparison:
 
 ```bash
-python pipeline.py grpo --root runs/ds8b_qwen1p7b_128_001 --steps 64 --resume runs/ds8b_qwen1p7b_128_001/grpo/checkpoint-32
+ROOT=/path/to/existing/runs/ds8b_qwen1p7b_128_001
+NAME=matched_grpo_post_sft_001
+
+python compare_post_sft.py prepare \
+  --root "$ROOT" --name "$NAME"
+
+python compare_post_sft.py train \
+  --root "$ROOT" --name "$NAME" \
+  --branch rl_then_sft
+
+python compare_post_sft.py train \
+  --root "$ROOT" --name "$NAME" \
+  --branch direct_sft
+
+python compare_post_sft.py eval \
+  --root "$ROOT" --name "$NAME" \
+  --stage original_sft
+
+python compare_post_sft.py eval \
+  --root "$ROOT" --name "$NAME" \
+  --stage original_rl
+
+python compare_post_sft.py eval \
+  --root "$ROOT" --name "$NAME" \
+  --stage rl_then_sft
+
+python compare_post_sft.py eval \
+  --root "$ROOT" --name "$NAME" \
+  --stage direct_sft
+
+python compare_post_sft.py report \
+  --root "$ROOT" --name "$NAME"
 ```
 
-`--steps 64` is the total target, not 64 additional updates. Only use a checkpoint that exists. Work after the most recent checkpoint can be lost on interruption. Keep all data, prompts, dependencies, and training settings unchanged when resuming. The final adapter alone is sufficient for inference, but not exact optimizer-state resumption.
+## Saved Outputs
 
-## Metrics and interpretation
-
-- SFT learns only completion tokens; prompt/padding labels are masked.
-- GRPO continues the SFT LoRA adapter with a correctness-only 0/1 reward. There is no length reward or KL penalty (`beta=0`).
-- Under this single-GPU configuration, microbatch 1 x accumulation 4 gives four completions per optimizer update. With four generations per question, 64 updates corresponds to approximately 64 question-processing events and 256 completions, not 64 full passes over 128 questions.
-- Groups with all-correct or all-wrong answers have little/no relative correctness learning signal. Look at reward and reward spread, not loss alone.
-- Truncated RL completions are masked. A high truncation rate requires investigation before training longer.
-- Compare Base/SFT/GRPO using the same test rows, prompt, budget, and greedy single-answer decoding.
-- Accuracy is the strict verifier score. GSM8K requires an explicit `#### <number>` or numeric `\boxed{...}`; the verifier does not guess from the last number in prose. Answer parse rate is reported separately. Manually audit Base parse failures before interpreting low Base scores as lack of mathematical ability.
-- A 64-question test changes by about 1.56 percentage points per answer. Use development data for tuning; viewing the test set repeatedly weakens its role as an untouched final evaluation.
-- Teacher coverage after retries is not single-attempt test accuracy. Evaluate the teacher independently using `eval_teacher.py`.
-
-Teacher evaluation uses its own chat template, the same saved test questions, the same 2048-token output budget, and the same final-answer verifier:
-
-```bash
-python eval_teacher.py --root runs/ds8b_qwen1p7b_128_001 --max-new-tokens 2048
+```text
+ROOT/post_sft_comparison/matched_grpo_post_sft_001/
+├── experiment.json
+├── additional_train.jsonl
+├── tokenized_train.jsonl
+├── fresh_test.jsonl
+├── environment.txt
+├── hardware.json
+├── console_logs/
+├── rl_then_sft/
+│   ├── checkpoints/
+│   ├── logs/
+│   ├── final/
+│   └── COMPLETE.json
+├── direct_sft/
+│   ├── checkpoints/
+│   ├── logs/
+│   ├── final/
+│   └── COMPLETE.json
+├── eval/
+├── comparison.csv
+├── paired_comparison.json
+└── comparison_plot.png
 ```
 
-Evaluation results support resuming. Do not overwrite trained adapters and reuse old evaluation filenames: use a new ROOT for a new experiment to avoid mixing old and new predictions. MATH-500 evaluation remains optional with `--split test_math500` and uses math-verify.
+The `final/` directories contain the continued LoRA adapters. Load the base model plus one final adapter for inference; do not stack the original source adapter again.
 
-## Resource management
+## Progress and Resuming
 
-The notebook checks free disk space before downloading the teacher. It keeps the teacher cache by default so optional teacher evaluation does not redownload it. An explicit optional cell can remove only the project's known local teacher cache after data generation. No model caches are stored on Drive by default; datasets, logs, checkpoints, and reports are persisted there. Downloaded weights occupy disk; model weights and generation caches occupy GPU memory. Freeing disk does not increase VRAM.
+Training displays:
 
-If teacher generation runs out of GPU memory, stop it and reduce its generation limit only after inspecting truncation/acceptance effects. If student training runs out of memory, reduce sequence/completion lengths and re-filter SFT traces rather than silently truncating answers. Do not change just one GRPO batching parameter: generation batches must remain divisible by the number of generations. Exact runtime and compute-unit consumption depend on the actual GPU, output lengths, and download speed.
+- Optimizer update counts
+- Loss and learning rate
+- GPU memory usage
+- Elapsed time and estimated remaining time
+- Checkpoint locations
 
-## Validation status
+Checkpoints are saved every four updates. Interrupted training resumes from the latest available checkpoint, while completed branches are skipped.
 
-Local checks cover Python syntax, every notebook code cell, CLI entry points, numeric verification, answer extraction, reward interfaces, and progress persistence/resume ETA. No Colab dependency installation, model download, GPU training, or benchmark evaluation has been run in the local environment. See `VALIDATION.json` for check results. The project includes no trained weights or claimed benchmark gain.
+Evaluation saves each prediction immediately and skips completed questions when rerun with unchanged settings.
 
-## Official sources
+## Limitations
 
-- Teacher: https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-- Student: https://huggingface.co/Qwen/Qwen3-1.7B-Base
-- GSM8K: https://huggingface.co/datasets/openai/gsm8k
-- MATH-500: https://huggingface.co/datasets/HuggingFaceH4/MATH-500
-- Pinned GRPO interface: https://huggingface.co/docs/trl/v0.23.1/en/grpo_trainer
+- One training seed, 64 additional examples, and 64 test questions are insufficient for strong general conclusions.
+- The RL source checkpoint is fixed; this experiment does not measure variability across independent RL runs.
+- Only additional SFT compute is matched, not total pipeline compute.
+- Additional supervision uses original GSM8K references rather than the teacher-generated traces used for initial SFT.
+- Strict answer formatting can affect accuracy; parse failures should be inspected separately.
+- Shorter outputs alone do not establish better reasoning.
+- Exact deduplication cannot exclude semantic duplicates or pretraining contamination.
+- Generation timing depends on hardware and runtime conditions.
 
-Check model/dataset licenses and upstream terms before redistribution; the teacher also documents its Llama-3.1 origin and associated terms.
+## Related Work
+
+- [OpenVLThinker: Complex Vision-Language Reasoning via Iterative SFT-RL Cycles](https://arxiv.org/abs/2503.17352)
+- [Mitigating Forgetting Between Supervised and Reinforcement Learning Yields Stronger Reasoners](https://arxiv.org/abs/2510.04454)
+- [Learning to Solve, Forgetting to Retain: Correct-Set Turnover in RLVR](https://arxiv.org/abs/2606.03087)
+
+This project does not claim that alternating SFT and RL or adding post-RL supervision is novel.
+
+Unlike OpenVLThinker, the current experiment does not generate next-round SFT data with an RL model or restart each iteration from a fixed original checkpoint. It continues saved adapters using shared reference-solution data.
+
+## Reproducibility
+
+Local checks cover Python/notebook syntax, command-line entry points, answer grading, progress logging, reference preprocessing, exact-overlap filtering, and paired comparison helpers.
+
+The reported GPU results come from the completed Colab experiment and were not independently reproduced by the local development checks.
+
+For verification, retain the experiment manifest, dependency and hardware records, source/final adapters, frozen test questions, training logs, and per-question predictions.
