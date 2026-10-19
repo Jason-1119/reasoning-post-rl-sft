@@ -1,0 +1,19 @@
+{
+  "python": "3.11.5",
+  "syntax": "passed for all Python files and notebook code cells",
+  "english_text_audit": "passed: no CJK text in project sources, docs, or notebook",
+  "cli_help": "pipeline, eval_teacher, inspect_run passed",
+  "unit_tests": "7 passed, including resume-aware ETA and durable progress metrics",
+  "gpu_training": "NOT RUN",
+  "colab_dependency_installation": "NOT RUN",
+  "model_and_dataset_downloads": "NOT RUN",
+  "configuration": {
+    "sft_candidates": 128,
+    "sft_epochs": 1,
+    "rl_questions": 128,
+    "grpo_updates": 64,
+    "dev_questions": 32,
+    "test_questions": 64
+  },
+  "note": "No trained weights, generated dataset, measured runtime, or benchmark claims included."
+}
